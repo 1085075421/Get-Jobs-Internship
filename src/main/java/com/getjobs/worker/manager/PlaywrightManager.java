@@ -72,6 +72,10 @@ public class PlaywrightManager {
     // 智联招聘页面（预留）
     private Page zhilianPage;
 
+    // 实习僧、牛客网页面
+    private Page shixisengPage;
+    private Page nowcoderPage;
+
     // 登录状态追踪（平台 -> 是否已登录）
     private final Map<String, Boolean> loginStatus = new ConcurrentHashMap<>();
 
@@ -88,6 +92,8 @@ public class PlaywrightManager {
 
     // 控制是否暂停对zhilianPage的后台监控
     private volatile boolean zhilianMonitoringPaused = false;
+    private volatile boolean shixisengMonitoringPaused = false;
+    private volatile boolean nowcoderMonitoringPaused = false;
 
     // 记录智联招聘是否已处理过未登录引导（仅初始化时执行一次）
     private volatile boolean zhilianLoginGuided = false;
@@ -124,10 +130,14 @@ public class PlaywrightManager {
     private static final String LIEPIN_URL = "https://www.liepin.com";
   private static final String JOB51_URL = "https://www.51job.com";
     private static final String ZHILIAN_URL = "https://www.zhaopin.com";
+    private static final String SHIXISENG_URL = "https://www.shixiseng.com";
+    private static final String NOWCODER_URL = "https://www.nowcoder.com/jobs/intern/center";
     private static final String BOSS_DOMAIN = "zhipin.com";
     private static final String LIEPIN_DOMAIN = "liepin.com";
     private static final String JOB51_DOMAIN = "51job.com";
     private static final String ZHILIAN_DOMAIN = "zhaopin.com";
+    private static final String SHIXISENG_DOMAIN = "shixiseng.com";
+    private static final String NOWCODER_DOMAIN = "nowcoder.com";
     // 降噪：51job Cookie保存日志节流状态
     private volatile long last51CookieLogMs = 0L;
     private volatile int last51CookieLogCount = -1;
@@ -302,34 +312,7 @@ public class PlaywrightManager {
 
             // 用持久化上下文启动：Patchright 官方明确要求用 launchPersistentContext，
             // 而不是 launch() + newContext()。登录态直接落盘到 USER_DATA_DIR。
-            context = playwright.chromium().launchPersistentContext(USER_DATA_DIR,
-                    new BrowserType.LaunchPersistentContextOptions()
-                            .setChannel("chrome")   // 用本机真实 Chrome，而不是 Chromium
-                            .setHeadless(false)     // 无头必被检测
-                            .setSlowMo(50)          // 放慢操作速度，便于调试
-                            .setViewportSize(null)  // 不锁视口，用窗口实际大小
-                            .setChromiumSandbox(true) // 不加 --no-sandbox：它本身就是自动化特征
-                            .setArgs(List.of(
-                                    "--start-maximized",
-                                    // Patchright 会加 --disable-blink-features=AutomationControlled，
-                                    // Chrome 因此弹"不受支持的命令行标记"黄条，用 --test-type 抑制
-                                    "--test-type",
-                                    // 上次非正常退出（IDEA 停止按钮、崩溃、kill）后，Chrome 会弹
-                                    // "要恢复页面吗？"模态框。那个框会挂起所有 CDP 页面操作，
-                                    // 表现为 navigate 永远不返回、连超时都不触发，整个初始化焊死。
-                                    "--disable-session-crashed-bubble",
-                                    "--hide-crash-restore-bubble",
-                                    "--no-first-run",
-                                    "--no-default-browser-check",
-                                    // 强制直连，不走系统代理（代理出口 IP 更容易被风控标记）
-                                    "--no-proxy-server",
-                                    "--proxy-bypass-list=*",
-                                    // 把 navigator.webdriver 压成 false。
-                                    // patchright 的 driver 会自动加这个标志，但它的超时机制是坏的
-                                    // （navigate/isVisible/waitForLoadState 的 timeout 全部失效，
-                                    // 会把线程无限期挂死）；用官方 driver 就得自己加。
-                                    "--disable-blink-features=AutomationControlled"
-                            )));
+            context = launchPersistentContextWithRetry();
             // 刻意不设置 UserAgent：伪造 UA 只改字符串，改不了 navigator.platform 和
             // navigator.userAgentData，反而制造出"UA 说 Mac、platform 说 Win32"这种致命矛盾。
             browserClosed = false;
@@ -368,6 +351,14 @@ public class PlaywrightManager {
             zhilianPage.setDefaultTimeout(DEFAULT_TIMEOUT);
             log.info("✓ 智联招聘 Page已创建");
 
+            shixisengPage = context.newPage();
+            shixisengPage.setDefaultTimeout(DEFAULT_TIMEOUT);
+            log.info("✓ 实习僧 Page已创建");
+
+            nowcoderPage = context.newPage();
+            nowcoderPage.setDefaultTimeout(DEFAULT_TIMEOUT);
+            log.info("✓ 牛客网 Page已创建");
+
             // 四个业务页都建好了，把持久化上下文自带的启动空白页关掉
             for (Page startup : startupPages) {
                 try {
@@ -387,12 +378,101 @@ public class PlaywrightManager {
             setupLiepinPlatform();
             setup51jobPlatform();
             setupZhilianPlatform();
+            setupCampusPlatform(shixisengPage, "shixiseng", SHIXISENG_URL);
+            setupCampusPlatform(nowcoderPage, "nowcoder", NOWCODER_URL);
 
             log.info("✓ 浏览器自动化引擎初始化完成（所有平台已依次启动）");
             log.info("========================================");
         } catch (Exception e) {
             log.error("✗ 浏览器自动化引擎初始化失败", e);
             throw new RuntimeException("Playwright初始化失败", e);
+        }
+    }
+
+    /**
+     * 启动持久化 Chrome 上下文。
+     * <p>
+     * Windows 上的 Chrome 偶尔会在创建 remote-debugging pipe 后立即正常退出，
+     * Playwright 此时只会收到 TargetClosedError。这个瞬时故障与平台、Cookie 和
+     * profile 内容无关；原实现会直接终止 Spring，导致所有平台一起显示启动失败。
+     * 首次遇到该故障时清理 Playwright 连接并重试一次，不删除 profile 或登录态。
+     */
+    private BrowserContext launchPersistentContextWithRetry() {
+        RuntimeException firstFailure = null;
+        for (int attempt = 1; attempt <= 2; attempt++) {
+            try {
+                return playwright.chromium().launchPersistentContext(USER_DATA_DIR,
+                        createPersistentContextOptions());
+            } catch (RuntimeException e) {
+                if (attempt == 2 || !isTransientChromeLaunchFailure(e)) {
+                    if (firstFailure != null) {
+                        e.addSuppressed(firstFailure);
+                    }
+                    throw e;
+                }
+
+                firstFailure = e;
+                log.warn("Chrome 持久化上下文首次启动后意外退出，1 秒后自动重试一次，不会清除登录态: {}",
+                        e.getMessage());
+                try {
+                    playwright.close();
+                } catch (Exception closeError) {
+                    log.debug("清理首次启动失败的 Playwright 实例时发生异常（忽略）: {}", closeError.getMessage());
+                }
+                playwright = null;
+                context = null;
+                sleepBeforeChromeRetry();
+                playwright = createPlaywright();
+                log.info("✓ Playwright引擎已重新创建，正在重试 Chrome 启动");
+            }
+        }
+        throw new IllegalStateException("Chrome 启动重试流程异常结束");
+    }
+
+    private BrowserType.LaunchPersistentContextOptions createPersistentContextOptions() {
+        return new BrowserType.LaunchPersistentContextOptions()
+                .setChannel("chrome")   // 用本机真实 Chrome，而不是 Chromium
+                .setHeadless(false)     // 无头必被检测
+                .setSlowMo(50)          // 放慢操作速度，便于调试
+                .setViewportSize(null)  // 不锁视口，用窗口实际大小
+                .setChromiumSandbox(true) // 不加 --no-sandbox：它本身就是自动化特征
+                .setArgs(List.of(
+                        "--start-maximized",
+                        // Patchright 会加 --disable-blink-features=AutomationControlled，
+                        // Chrome 因此弹"不受支持的命令行标记"黄条，用 --test-type 抑制
+                        "--test-type",
+                        // 上次非正常退出（IDEA 停止按钮、崩溃、kill）后，Chrome 会弹
+                        // "要恢复页面吗？"模态框。那个框会挂起所有 CDP 页面操作。
+                        "--disable-session-crashed-bubble",
+                        "--hide-crash-restore-bubble",
+                        "--no-first-run",
+                        "--no-default-browser-check",
+                        // 强制直连，不走系统代理（代理出口 IP 更容易被风控标记）
+                        "--no-proxy-server",
+                        "--proxy-bypass-list=*",
+                        "--disable-blink-features=AutomationControlled"
+                ));
+    }
+
+    private boolean isTransientChromeLaunchFailure(Throwable throwable) {
+        for (Throwable current = throwable; current != null; current = current.getCause()) {
+            if ("TargetClosedError".equals(current.getClass().getSimpleName())) {
+                return true;
+            }
+            String message = current.getMessage();
+            if (message != null && message.contains("Target page, context or browser has been closed")) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    private void sleepBeforeChromeRetry() {
+        try {
+            Thread.sleep(1_000);
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            throw new IllegalStateException("等待重试 Chrome 启动时线程被中断", e);
         }
     }
 
@@ -1538,6 +1618,7 @@ public class PlaywrightManager {
             case "liepin" -> saveLiepinCookiesToDatabase(remark);
             case "51job" -> save51jobCookiesToDatabase(remark);
             case "zhilian" -> saveZhilianCookiesToDatabase(remark);
+            case "shixiseng", "nowcoder" -> saveCampusCookies(platform, remark);
             default -> throw new IllegalArgumentException("Unsupported platform: " + platform);
         }
     }
@@ -1573,6 +1654,107 @@ public class PlaywrightManager {
     public void resumeZhilianMonitoring() {
         zhilianMonitoringPaused = false;
         log.debug("智联招聘登录监控已恢复");
+    }
+
+    /** 初始化校园/实习类平台，登录由用户在对应标签页手动完成。 */
+    private void setupCampusPlatform(Page page, String platform, String url) {
+        try {
+            CookieEntity saved = cookieService.getCookieByPlatform(platform);
+            if (saved != null && saved.getCookieValue() != null && !saved.getCookieValue().isBlank()) {
+                String domain = "shixiseng".equals(platform) ? SHIXISENG_DOMAIN : NOWCODER_DOMAIN;
+                List<Cookie> cookies = filterCookiesByDomain(parseCookiesFromString(saved.getCookieValue()), domain);
+                if (!cookies.isEmpty()) context.addCookies(cookies);
+            }
+        } catch (Exception e) {
+            log.warn("从数据库加载{} Cookie失败: {}", platform, e.getMessage());
+        }
+        try {
+            page.navigate(url, new Page.NavigateOptions().setWaitUntil(WaitUntilState.DOMCONTENTLOADED)
+                    .setTimeout(DEFAULT_TIMEOUT));
+        } catch (Exception e) {
+            log.warn("初始化{}页面失败，可在标签页中手动打开: {}", platform, e.getMessage());
+        }
+        setLoginStatus(platform, checkCampusLogin(page, platform));
+    }
+
+    private boolean checkCampusLogin(Page page, String platform) {
+        if (page == null || page.isClosed()) return false;
+        try {
+            Object state = page.evaluate("shixiseng".equals(platform)
+                    ? "() => { const s=window.__NUXT__&&window.__NUXT__.state; const u=s&&s.userInfo; " +
+                      "return Boolean(s && (s.isLogin || (u && (u.name || u.account || u.uuid || u.group_uuid)))); }"
+                    : "() => Boolean(window.isLogin || (window.envInfo && window.envInfo.isLogin))");
+            if (Boolean.TRUE.equals(state)) return true;
+            String selector = "shixiseng".equals(platform)
+                    ? ".login-status .nickname, .login-status .mine, .logined .nickname, .logined .mine"
+                    : ".nav-account .user-name, .nav-account .nickname, .user-card .user-name";
+            if (isVisibleQuick(page.locator(selector).first())) return true;
+            if ("shixiseng".equals(platform)) {
+                // 实习僧退出登录的官方脚本会删除这两个 Cookie，比首页 Vue 瞬时状态更稳定。
+                return context.cookies().stream().anyMatch(c -> c.domain != null
+                        && c.domain.contains(SHIXISENG_DOMAIN)
+                        && ("affefdgx".equals(c.name) || "userflag".equals(c.name))
+                        && c.value != null && !c.value.isBlank());
+            }
+            return false;
+        } catch (Exception e) {
+            log.debug("检查{} 登录状态失败: {}", platform, e.getMessage());
+            return false;
+        }
+    }
+
+    private void checkCampusLoginStatus(Page page, String platform) {
+        boolean current = checkCampusLoginAcrossPages(platform);
+        Boolean previous = loginStatus.get(platform);
+        if (previous == null || previous != current) {
+            setLoginStatus(platform, current);
+            if (current) saveCampusCookies(platform, "login success");
+        }
+    }
+
+    private void saveCampusCookies(String platform, String remark) {
+        try {
+            String domain = "shixiseng".equals(platform) ? SHIXISENG_DOMAIN : NOWCODER_DOMAIN;
+            List<com.microsoft.playwright.options.Cookie> cookies = filterCookiesByDomain(context.cookies(), domain);
+            String cookieJson = new ObjectMapper().writeValueAsString(cookies);
+            cookieService.saveOrUpdateCookie(platform, cookieJson, remark);
+            log.info("保存{} Cookie成功，共 {} 条", platform, cookies.size());
+        } catch (Exception e) {
+            log.warn("保存{} Cookie失败: {}", platform, e.getMessage());
+        }
+    }
+
+    public void pauseCampusMonitoring(String platform) {
+        if ("shixiseng".equals(platform)) shixisengMonitoringPaused = true;
+        if ("nowcoder".equals(platform)) nowcoderMonitoringPaused = true;
+    }
+
+    public void resumeCampusMonitoring(String platform) {
+        if ("shixiseng".equals(platform)) shixisengMonitoringPaused = false;
+        if ("nowcoder".equals(platform)) nowcoderMonitoringPaused = false;
+    }
+
+    public boolean refreshCampusLoginStatus(String platform) {
+        return callOnPlaywright(() -> {
+            boolean loggedIn = checkCampusLoginAcrossPages(platform);
+            setLoginStatus(platform, loggedIn);
+            if (loggedIn) saveCampusCookies(platform, "manual check");
+            return loggedIn;
+        });
+    }
+
+    private boolean checkCampusLoginAcrossPages(String platform) {
+        Page primary = "shixiseng".equals(platform) ? shixisengPage : nowcoderPage;
+        if (checkCampusLogin(primary, platform)) return true;
+        String domain = "shixiseng".equals(platform) ? SHIXISENG_DOMAIN : NOWCODER_DOMAIN;
+        if (context == null) return false;
+        for (Page candidate : context.pages()) {
+            if (candidate == primary || candidate.isClosed()) continue;
+            try {
+                if (candidate.url().contains(domain) && checkCampusLogin(candidate, platform)) return true;
+            } catch (Exception ignored) {}
+        }
+        return false;
     }
 
     /**
@@ -1777,6 +1959,12 @@ public class PlaywrightManager {
                 if (zhilianPage != null && !zhilianMonitoringPaused) {
                     checkZhilianLoginStatus(zhilianPage);
                 }
+                if (shixisengPage != null && !shixisengMonitoringPaused) {
+                    checkCampusLoginStatus(shixisengPage, "shixiseng");
+                }
+                if (nowcoderPage != null && !nowcoderMonitoringPaused) {
+                    checkCampusLoginStatus(nowcoderPage, "nowcoder");
+                }
             } catch (Exception e) {
                 log.debug("定时登录检测异常: {}", e.getMessage());
             }
@@ -1824,6 +2012,14 @@ public class PlaywrightManager {
             if (zhilianPage != null) {
                 zhilianPage.close();
                 log.info("智联招聘页面已关闭");
+            }
+            if (shixisengPage != null) {
+                shixisengPage.close();
+                log.info("实习僧页面已关闭");
+            }
+            if (nowcoderPage != null) {
+                nowcoderPage.close();
+                log.info("牛客网页面已关闭");
             }
 
             // 关闭共享的BrowserContext（持久化上下文关闭即等于关浏览器，没有独立的 Browser 对象）
@@ -1876,6 +2072,8 @@ public class PlaywrightManager {
         liepinPage = null;
         job51Page = null;
         zhilianPage = null;
+        shixisengPage = null;
+        nowcoderPage = null;
         browserClosed = false;
         loginStatus.clear();
         init();

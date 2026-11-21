@@ -23,6 +23,9 @@ public class Job51ConfigEntity {
     /** 薪资范围（中文名或代码，列表字符串） */
     private String salary;
 
+    /** 附件简历序号，从1开始；未配置时默认第一份 */
+    private Integer resumeIndex;
+
     /** 创建时间 */
     private LocalDateTime createdAt;
 

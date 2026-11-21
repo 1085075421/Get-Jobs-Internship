@@ -46,6 +46,7 @@ public class Job51Service {
             config.setKeywords(new ArrayList<>());
             config.setJobArea(new ArrayList<>());
             config.setSalary(new ArrayList<>());
+            config.setResumeIndex(1);
             return config;
         }
 
@@ -71,8 +72,13 @@ public class Job51Service {
             salaryCodes.add(code);
         }
         config.setSalary(salaryCodes);
+        config.setResumeIndex(normalizeResumeIndex(entity.getResumeIndex()));
 
         return config;
+    }
+
+    static int normalizeResumeIndex(Integer resumeIndex) {
+        return resumeIndex == null || resumeIndex < 1 ? 1 : resumeIndex;
     }
 
     public List<String> parseListString(String raw) {
@@ -164,9 +170,24 @@ public class Job51Service {
 
     @PostConstruct
     public void ensureJob51OptionTableAndData() {
+        ensureJob51ConfigColumns();
         // 仅确保表存在；城市选项完全由数据库维护
         ensureJob51OptionTable();
         ensureJob51DataTable();
+    }
+
+    private void ensureJob51ConfigColumns() {
+        try (Connection conn = dataSource.getConnection(); Statement stmt = conn.createStatement()) {
+            try {
+                stmt.execute("ALTER TABLE job51_config ADD COLUMN resume_index INTEGER DEFAULT 1");
+                log.info("已为 job51_config 添加附件简历序号配置");
+            } catch (Exception ignored) {
+                // SQLite 没有通用的 ADD COLUMN IF NOT EXISTS，列已存在时直接忽略。
+            }
+            stmt.executeUpdate("UPDATE job51_config SET resume_index=1 WHERE resume_index IS NULL OR resume_index < 1");
+        } catch (Exception e) {
+            log.warn("初始化 51job 附件简历序号配置失败: {}", e.getMessage());
+        }
     }
 
     private void ensureJob51OptionTable() {
@@ -208,6 +229,9 @@ public class Job51Service {
      */
     public Job51ConfigEntity updateConfig(Job51ConfigEntity config) {
         if (config == null) return null;
+        if (config.getResumeIndex() != null) {
+            config.setResumeIndex(normalizeResumeIndex(config.getResumeIndex()));
+        }
         if (config.getId() != null) {
             // 设置更新时间
             config.setUpdatedAt(java.time.LocalDateTime.now());
@@ -228,6 +252,7 @@ public class Job51Service {
             toInsert.setKeywords(incoming.getKeywords());
             toInsert.setJobArea(incoming.getJobArea());
             toInsert.setSalary(incoming.getSalary());
+            toInsert.setResumeIndex(normalizeResumeIndex(incoming.getResumeIndex()));
             toInsert.setCreatedAt(now);
             toInsert.setUpdatedAt(now);
             job51ConfigMapper.insert(toInsert);
@@ -239,6 +264,9 @@ public class Job51Service {
             if (incoming.getKeywords() != null) toUpdate.setKeywords(incoming.getKeywords());
             if (incoming.getJobArea() != null) toUpdate.setJobArea(incoming.getJobArea());
             if (incoming.getSalary() != null) toUpdate.setSalary(incoming.getSalary());
+            if (incoming.getResumeIndex() != null) {
+                toUpdate.setResumeIndex(normalizeResumeIndex(incoming.getResumeIndex()));
+            }
             toUpdate.setCreatedAt(first.getCreatedAt());
             toUpdate.setUpdatedAt(now);
             job51ConfigMapper.updateById(toUpdate);

@@ -28,6 +28,14 @@ public class ZhilianConfig {
      */
     private String salary;
 
+    /**
+     * 工作性质：0=不限，4=实习（对应智联搜索参数 et）
+     */
+    private String jobNature;
+
+    /** 城市码列表；选择“不限”时按热门城市顺序包含全部城市。 */
+    private List<String> cityCodes;
+
 
     // 注意：已改为在 ZhilianJobService 中通过 ConfigService 构建配置
     // 保留空的 init 以兼容旧调用，但建议不要再使用

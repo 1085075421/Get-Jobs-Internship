@@ -2,6 +2,7 @@ package com.getjobs.application.controller;
 
 import com.getjobs.application.entity.CookieEntity;
 import com.getjobs.application.entity.ZhilianConfigEntity;
+import com.getjobs.application.entity.ZhilianBlacklistEntity;
 import com.getjobs.application.service.CookieService;
 import com.getjobs.application.service.ZhilianService;
 import com.getjobs.worker.manager.PlaywrightManager;
@@ -64,6 +65,7 @@ public class ZhilianController {
 
         result.put("config", config);
         result.put("options", options);
+        result.put("blacklist", zhilianService.getAllBlacklist());
         return result;
     }
 
@@ -86,6 +88,28 @@ public class ZhilianController {
             m.put("code", e.getCode());
             return m;
         }).collect(Collectors.toList());
+    }
+
+    @GetMapping("/blacklist")
+    public List<ZhilianBlacklistEntity> getBlacklist() {
+        return zhilianService.getAllBlacklist();
+    }
+
+    @PostMapping("/blacklist")
+    public ResponseEntity<?> addBlacklist(@RequestBody ZhilianBlacklistEntity blacklist) {
+        try {
+            return ResponseEntity.ok(zhilianService.addBlacklist(blacklist.getType(), blacklist.getValue()));
+        } catch (IllegalArgumentException e) {
+            return ResponseEntity.badRequest().body(Map.of("success", false, "message", e.getMessage()));
+        }
+    }
+
+    @DeleteMapping("/blacklist/{id}")
+    public ResponseEntity<Map<String, Object>> deleteBlacklist(@PathVariable Long id) {
+        boolean deleted = zhilianService.deleteBlacklist(id);
+        return deleted
+                ? ResponseEntity.ok(Map.of("success", true))
+                : ResponseEntity.status(404).body(Map.of("success", false, "message", "黑名单记录不存在"));
     }
 
     // ==================== 登录和认证相关接口 ====================

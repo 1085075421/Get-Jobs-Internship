@@ -31,6 +31,11 @@ public class Job51Config {
      */
     private List<String> salary;
 
+    /**
+     * 投递时选择的附件简历序号，从 1 开始；未配置或小于 1 时使用第一份。
+     */
+    private Integer resumeIndex = 1;
+
 
     // 注意：已改为在 Job51JobService 中通过 ConfigService 构建配置
     // 保留空的 init 以兼容旧调用，但建议不要再使用

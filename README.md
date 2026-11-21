@@ -1,5 +1,5 @@
 <!-- Project overview and usage guide. -->
-<h1 align="center">🍀 Get Jobs【工作无忧】</h1>
+<h1 align="center">🍀 Get Jobs Internship【实习求职增强版】</h1>
 <div align="center">
 
 [![Stars](https://img.shields.io/github/stars/loks666/get_jobs?style=flat&label=🌟stars&labelColor=ff4f4f&color=ff8383)](https://github.com/loks666/get_jobs)
@@ -33,6 +33,20 @@
 
 </div>
 
+## 📌 二次开发声明
+
+本仓库是基于 [loks666/get_jobs](https://github.com/loks666/get_jobs) 的 Fork 与非商业二次开发版本，重点面向实习岗位搜索和批量投递场景。原项目的著作权、历史贡献及许可证均归原作者和原贡献者所有；本仓库保留上游项目来源，并继续遵循仓库中的 [PolyForm Noncommercial 1.0.0 许可证](LICENSE)。
+
+本版本并非原作者发布的官方版本。二次开发代码由 [1085075421](https://github.com/1085075421) 在上游项目基础上维护，主要变更包括：
+
+- 新增 **实习僧**、**牛客网** 两个平台的登录状态、关键词搜索、逐页投递、附件简历选择和投递分析。
+- 修复并增强 **智联招聘**：实习工作性质筛选、热门城市逐城投递、岗位元数据识别、成功状态处理及公司/岗位黑名单。
+- 优化 **51job** 附件简历选择、发送确认、成功弹窗关闭、校招岗位排除及任务稳定性。
+- 为智联招聘、实习僧和牛客网提供共享的公司名称与岗位名称关键词黑名单，在点击投递前完成过滤。
+- 补充自动化测试、Cookie 持久化、浏览器启动容错和配置页面交互。
+
+招聘网站页面和风控策略可能随时调整，请遵守各平台用户协议并合理控制使用频率。本项目仅供个人学习和非商业求职辅助使用，使用者应自行承担账号及投递行为相关风险。
+
 - 🔔 *重要更新*
     - boss，猎聘已更新，目前两平台都可正常使用
     - boss仍然建议手动在boss端投递，使用本项目在PC兜底使用。
@@ -42,8 +56,9 @@
 
 ### 🌴源码地址
 
-- Github (国外访问)：https://github.com/loks666/get_jobs
-- Gitee·码云 (中国大陆)：https://gitee.com/lok666/get_jobs
+- 本二次开发仓库：https://github.com/1085075421/Get-Jobs-Internship
+- 上游原项目：https://github.com/loks666/get_jobs
+- 上游 Gitee 镜像：https://gitee.com/lok666/get_jobs
 
 ### 📢 广告位招租
 
@@ -79,8 +94,8 @@
 ### 1️⃣ 使用git拉取代码
 
 ```
-git clone https://github.com/loks666/get_jobs.git
-cd get_jobs
+git clone https://github.com/1085075421/Get-Jobs-Internship.git
+cd Get-Jobs-Internship
 ```
 
 ### 2️⃣ 环境配置:Gradle、JDK21
@@ -160,7 +175,11 @@ release 页面下载空数据库：
   > 智联招聘需要指定默认投递简历 (在线简历 or 附件简历)，否则会投递失败
   > 只可微信扫码，请绑定微信账号
 
-- 本项目目前维护的平台为boss，猎聘，由于51、智联、拉钩使用人太少，已停止维护，如有人修复了这三项平台问题，可经沟通后提交pr.
+- 实习僧：支持关键词和城市配置、最新排序、全结果页遍历、附件简历选择、共享黑名单与投递分析。
+
+- 牛客网：支持实习岗位搜索、逐岗位投递、共享黑名单与投递结果分析。
+
+- 上游项目主要维护 Boss 直聘与猎聘；本二次开发版重点补充和维护 51job、智联招聘、实习僧及牛客网的实习投递流程。
 
 ### 5️⃣ 运行代码
 

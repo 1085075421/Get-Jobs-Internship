@@ -30,7 +30,10 @@ public class ZhilianOptionInitializer implements CommandLineRunner {
     @Override
     public void run(String... args) throws Exception {
         ensureTableExists();
-        // 已改为从数据库获取城市选项，移除基于 city.json 的种子插入逻辑
+        // 补齐智联热门城市面板中的选项。已存在的数据保持不变，仅补缺失项。
+        insertIfNotExists("city", "惠州", "773", 42);
+        insertIfNotExists("city", "烟台", "707", 43);
+        insertIfNotExists("city", "澳门", "562", 44);
     }
 
     private void ensureTableExists() {
