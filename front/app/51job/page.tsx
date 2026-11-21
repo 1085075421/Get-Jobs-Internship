@@ -18,6 +18,7 @@ interface Job51Config {
   keywords?: string
   jobArea?: string
   salary?: string // 存储JSON数组字符串，如 ["03","04","05"]
+  resumeIndex?: number // 附件简历序号，从1开始
 }
 
 interface Job51Option { name: string; code: string }
@@ -37,7 +38,7 @@ export default function Job51Page() {
   const [showLogoutResultDialog, setShowLogoutResultDialog] = useState(false)
   const [logoutResult, setLogoutResult] = useState<{ success: boolean; message: string } | null>(null)
 
-  const [config, setConfig] = useState<Job51Config>({ keywords: '', jobArea: '', salary: '' })
+  const [config, setConfig] = useState<Job51Config>({ keywords: '', jobArea: '', salary: '', resumeIndex: 1 })
   const [options, setOptions] = useState<Job51Options>({ jobArea: [], salary: [] })
   const [loadingConfig, setLoadingConfig] = useState(true)
   const [isCustomArea, setIsCustomArea] = useState(false)
@@ -209,14 +210,14 @@ export default function Job51Page() {
       const res = await fetch(`${API}/api/51job/config`)
       if (!res.ok) {
         console.warn(`[51job] 获取配置失败: ${res.status}`)
-        setConfig({ keywords: '', jobArea: '', salary: '' })
+        setConfig({ keywords: '', jobArea: '', salary: '', resumeIndex: 1 })
         setOptions({ jobArea: [], salary: [] })
         return
       }
       const data = await res.json()
       if (data.config || data.options) {
         const opts: Job51Options = data.options || { jobArea: [], salary: [] }
-        const conf: Job51Config = data.config || { keywords: '', jobArea: '', salary: '' }
+        const conf: Job51Config = data.config || { keywords: '', jobArea: '', salary: '', resumeIndex: 1 }
 
         // 关键词标准化（展示用）
         const normalizedKeywords = parseKeywordsFromDb(conf.keywords)
@@ -242,7 +243,13 @@ export default function Job51Page() {
         const areaCode = matchArea?.code || (areaList.find((o) => o.name === '不限')?.code || areaList.find((o) => o.code === '0')?.code || '')
 
         setOptions(opts)
-        setConfig({ ...conf, keywords: normalizedKeywords, jobArea: areaCode, salary: JSON.stringify(salaryCodes) })
+        setConfig({
+          ...conf,
+          keywords: normalizedKeywords,
+          jobArea: areaCode,
+          salary: JSON.stringify(salaryCodes),
+          resumeIndex: Math.max(1, Number(conf.resumeIndex) || 1),
+        })
         setSelectedSalaries(salaryCodes)
         setIsCustomArea(false)
       }
@@ -370,6 +377,7 @@ export default function Job51Page() {
         keywords: serializeKeywordsForDb(config.keywords),
         jobArea: toBracketListString(config.jobArea, 'jobArea'),
         salary: toBracketListString(config.salary, 'salary'),
+        resumeIndex: Math.max(1, Number(config.resumeIndex) || 1),
       }
       const response = await fetch(`${API}/api/51job/config`, {
         method: 'PUT',
@@ -583,6 +591,23 @@ export default function Job51Page() {
                     </div>
                     <p className="text-xs text-muted-foreground">
                       已选择 {selectedSalaries.length}/{MAX_SALARY_SELECTIONS} 个薪资范围
+                    </p>
+                  </div>
+                  <div className="space-y-2">
+                    <Label>附件简历序号</Label>
+                    <Input
+                      type="number"
+                      min={1}
+                      step={1}
+                      placeholder="1"
+                      value={config.resumeIndex ?? 1}
+                      onChange={(e) => {
+                        const value = Number.parseInt(e.target.value, 10)
+                        setConfig((c) => ({ ...c, resumeIndex: Number.isFinite(value) && value > 0 ? value : 1 }))
+                      }}
+                    />
+                    <p className="text-xs text-muted-foreground">
+                      按51job弹窗中的顺序选择第几份附件简历；未填写或序号超出范围时使用第一份。
                     </p>
                   </div>
                 </div>

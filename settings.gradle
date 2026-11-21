@@ -1,2 +1,9 @@
 // Project identity: keep the Gradle name aligned with the repository name.
+pluginManagement {
+    repositories {
+        mavenCentral()
+        gradlePluginPortal()
+    }
+}
+
 rootProject.name = 'get_jobs'

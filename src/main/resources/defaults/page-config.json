@@ -34,14 +34,16 @@
     {
       "keywords": "[\"java\", \"python\", \"go\", \"golang\", \"大模型\", \"软件工程师\"]",
       "job_area": "[\"上海\"]",
-      "salary": "[\"不限\"]"
+      "salary": "[\"不限\"]",
+      "resume_index": 1
     }
   ],
   "zhilian_config": [
     {
       "keywords": "[\"大模型\",\"Java\",\"Python\",\"Golang\"]",
       "city_code": "538",
-      "salary": "35000,50000"
+      "salary": "35000,50000",
+      "job_nature": "0"
     }
   ],
   "ai": [

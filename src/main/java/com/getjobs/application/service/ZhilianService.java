@@ -4,9 +4,11 @@ import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
 import com.getjobs.application.entity.ZhilianConfigEntity;
 import com.getjobs.application.entity.ZhilianOptionEntity;
 import com.getjobs.application.entity.ZhilianJobDataEntity;
+import com.getjobs.application.entity.ZhilianBlacklistEntity;
 import com.getjobs.application.mapper.ZhilianConfigMapper;
 import com.getjobs.application.mapper.ZhilianOptionMapper;
 import com.getjobs.application.mapper.ZhilianJobDataMapper;
+import com.getjobs.application.mapper.ZhilianBlacklistMapper;
 import com.getjobs.worker.zhilian.ZhilianConfig;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -27,9 +29,16 @@ import java.util.stream.Collectors;
 @Slf4j
 @RequiredArgsConstructor
 public class ZhilianService {
+    /** 与智联“热门城市”面板一致的顺序；编码已通过智联搜索页校验。 */
+    private static final List<String> POPULAR_CITY_CODES = List.of(
+            "530", "538", "763", "551", "765", "531", "736", "854", "801",
+            "600", "613", "599", "635", "702", "703", "653", "639", "636",
+            "654", "719", "749", "681", "682", "622", "565", "664", "773",
+            "576", "831", "707", "768", "691", "822", "561", "562");
     private final ZhilianConfigMapper zhilianConfigMapper;
     private final ZhilianOptionMapper zhilianOptionMapper;
     private final ZhilianJobDataMapper zhilianJobDataMapper;
+    private final ZhilianBlacklistMapper zhilianBlacklistMapper;
     private final DataSource dataSource;
 
     /** 获取第一条配置（通常只有一条） */
@@ -47,7 +56,9 @@ public class ZhilianService {
             log.warn("zhilian_config 表为空，使用默认空配置");
             config.setKeywords(new ArrayList<>());
             config.setCityCode("0");
+            config.setCityCodes(getHotCityCodes());
             config.setSalary("0");
+            config.setJobNature("0");
             return config;
         }
 
@@ -69,6 +80,9 @@ public class ZhilianService {
                 config.setCityCode(code);
             }
         }
+        config.setCityCodes("0".equals(config.getCityCode())
+                ? getHotCityCodes()
+                : List.of(config.getCityCode()));
 
         // 薪资：缺省或“不限”映射为 0，其它保持原值
         String salary = safeTrim(entity.getSalary());
@@ -77,6 +91,10 @@ public class ZhilianService {
         } else {
             config.setSalary(salary);
         }
+
+        // 工作性质：当前前端仅开放“不限”和“实习”。旧配置没有该列时按不限处理。
+        String jobNature = safeTrim(entity.getJobNature());
+        config.setJobNature("4".equals(jobNature) || "实习".equals(jobNature) ? "4" : "0");
         return config;
     }
 
@@ -127,6 +145,7 @@ public class ZhilianService {
             toInsert.setKeywords(incoming.getKeywords());
             toInsert.setCityCode(incoming.getCityCode());
             toInsert.setSalary(incoming.getSalary());
+            toInsert.setJobNature(normalizeJobNature(incoming.getJobNature()));
             toInsert.setCreatedAt(now);
             toInsert.setUpdatedAt(now);
             zhilianConfigMapper.insert(toInsert);
@@ -137,11 +156,17 @@ public class ZhilianService {
             if (incoming.getKeywords() != null) toUpdate.setKeywords(incoming.getKeywords());
             if (incoming.getCityCode() != null) toUpdate.setCityCode(incoming.getCityCode());
             if (incoming.getSalary() != null) toUpdate.setSalary(incoming.getSalary());
+            if (incoming.getJobNature() != null) toUpdate.setJobNature(normalizeJobNature(incoming.getJobNature()));
             toUpdate.setCreatedAt(first.getCreatedAt());
             toUpdate.setUpdatedAt(now);
             zhilianConfigMapper.updateById(toUpdate);
             return zhilianConfigMapper.selectById(first.getId());
         }
+    }
+
+    private String normalizeJobNature(String value) {
+        String normalized = safeTrim(value);
+        return "4".equals(normalized) || "实习".equals(normalized) ? "4" : "0";
     }
 
     // ========== Option 辅助 ==========
@@ -152,6 +177,11 @@ public class ZhilianService {
                         .eq("type", type)
                         .orderByAsc("sort_order")
         );
+    }
+
+    /** 不限城市在智联侧无法直接表达，因此展开为按 sort_order 排列的全部热门城市。 */
+    public List<String> getHotCityCodes() {
+        return POPULAR_CITY_CODES;
     }
 
     public ZhilianOptionEntity getOptionByTypeAndCode(String type, String code) {
@@ -182,6 +212,7 @@ public class ZhilianService {
 
     @PostConstruct
     public void ensureZhilianDataTableExists() {
+        ensureZhilianConfigColumns();
         String createSql = "CREATE TABLE IF NOT EXISTS zhilian_data (" +
                 " id INTEGER PRIMARY KEY AUTOINCREMENT," +
                 " job_id VARCHAR(64)," +
@@ -198,9 +229,80 @@ public class ZhilianService {
                 ")";
         try (Connection conn = dataSource.getConnection(); Statement stmt = conn.createStatement()) {
             stmt.execute(createSql);
+            stmt.execute("CREATE TABLE IF NOT EXISTS zhilian_blacklist (" +
+                    " id INTEGER PRIMARY KEY AUTOINCREMENT," +
+                    " type VARCHAR(20) NOT NULL," +
+                    " value VARCHAR(200) NOT NULL," +
+                    " created_at DATETIME," +
+                    " updated_at DATETIME" +
+                    ")");
+            stmt.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_zhilian_blacklist_type_value " +
+                    "ON zhilian_blacklist(type, value)");
             log.info("确保 zhilian_data 表已存在");
         } catch (Exception e) {
             log.warn("创建 zhilian_data 表失败: {}", e.getMessage());
+        }
+    }
+
+    public List<ZhilianBlacklistEntity> getAllBlacklist() {
+        return zhilianBlacklistMapper.selectList(
+                new QueryWrapper<ZhilianBlacklistEntity>().orderByAsc("type").orderByAsc("id"));
+    }
+
+    public Set<String> getBlacklistValues(String type) {
+        return zhilianBlacklistMapper.selectList(
+                        new QueryWrapper<ZhilianBlacklistEntity>().eq("type", type).orderByAsc("id"))
+                .stream()
+                .map(ZhilianBlacklistEntity::getValue)
+                .filter(Objects::nonNull)
+                .map(String::trim)
+                .filter(value -> !value.isEmpty())
+                .collect(Collectors.toCollection(LinkedHashSet::new));
+    }
+
+    public ZhilianBlacklistEntity addBlacklist(String type, String value) {
+        String normalizedType = normalizeBlacklistType(type);
+        String normalizedValue = value == null ? "" : value.trim();
+        if (normalizedValue.isEmpty()) {
+            throw new IllegalArgumentException("黑名单关键词不能为空");
+        }
+        ZhilianBlacklistEntity existing = zhilianBlacklistMapper.selectOne(
+                new QueryWrapper<ZhilianBlacklistEntity>()
+                        .eq("type", normalizedType)
+                        .eq("value", normalizedValue)
+                        .last("LIMIT 1"));
+        if (existing != null) return existing;
+
+        LocalDateTime now = LocalDateTime.now();
+        ZhilianBlacklistEntity entity = new ZhilianBlacklistEntity();
+        entity.setType(normalizedType);
+        entity.setValue(normalizedValue);
+        entity.setCreatedAt(now);
+        entity.setUpdatedAt(now);
+        zhilianBlacklistMapper.insert(entity);
+        return entity;
+    }
+
+    public boolean deleteBlacklist(Long id) {
+        return id != null && zhilianBlacklistMapper.deleteById(id) > 0;
+    }
+
+    private String normalizeBlacklistType(String type) {
+        if ("company".equals(type) || "job".equals(type)) return type;
+        throw new IllegalArgumentException("黑名单类型仅支持 company 或 job");
+    }
+
+    private void ensureZhilianConfigColumns() {
+        try (Connection conn = dataSource.getConnection(); Statement stmt = conn.createStatement()) {
+            try {
+                stmt.execute("ALTER TABLE zhilian_config ADD COLUMN job_nature VARCHAR(20) DEFAULT '0'");
+                log.info("已为 zhilian_config 添加工作性质配置");
+            } catch (Exception ignored) {
+                // SQLite 不支持通用的 ADD COLUMN IF NOT EXISTS，列已存在时忽略。
+            }
+            stmt.executeUpdate("UPDATE zhilian_config SET job_nature='0' WHERE job_nature IS NULL OR TRIM(job_nature)=''");
+        } catch (Exception e) {
+            log.warn("初始化智联工作性质配置失败: {}", e.getMessage());
         }
     }
 

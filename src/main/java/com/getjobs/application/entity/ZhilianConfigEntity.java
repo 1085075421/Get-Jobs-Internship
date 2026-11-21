@@ -23,6 +23,9 @@ public class ZhilianConfigEntity {
     /** 薪资范围（中文名或代码，单值） */
     private String salary;
 
+    /** 工作性质（0=不限，4=实习） */
+    private String jobNature;
+
     /** 创建时间 */
     private LocalDateTime createdAt;
 

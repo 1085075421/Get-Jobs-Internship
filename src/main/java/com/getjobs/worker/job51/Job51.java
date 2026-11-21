@@ -45,6 +45,7 @@ public class Job51 {
     private final Job51Service job51Service;
     private boolean networkHooked = false;
     private boolean reachedDailyLimit = false;
+    private boolean blockingDialogOpen = false;
     private final java.util.Set<String> processedRequestIds = new java.util.HashSet<>();
     @Getter
     private int currentPageNum = 0;
@@ -67,6 +68,7 @@ public class Job51 {
      */
     public void prepare() {
         resultList.clear();
+        blockingDialogOpen = false;
     }
 
     /**
@@ -188,7 +190,7 @@ public class Job51 {
 
             // 导航到搜索页面
             page.navigate(searchUrl);
-            PlaywrightUtil.sleep(1);
+            page.waitForTimeout(300);
 
             // 检查是否需要登录
             if (checkNeedLogin()) {
@@ -201,7 +203,7 @@ public class Job51 {
                 Locator sortOptions = page.locator("div.ss");
                 if (sortOptions.count() > 0) {
                     sortOptions.first().click();
-                    PlaywrightUtil.sleep(1);
+                    page.waitForTimeout(200);
                 }
             } catch (Exception e) { /* 静默 */ }
 
@@ -220,7 +222,11 @@ public class Job51 {
                     break;
                 }
 
-                PlaywrightUtil.sleep(2);
+                // 岗位按钮出现即可开始，不再无条件等待2秒。
+                try {
+                    page.waitForSelector("button.btn.apply, button[trace-name='申请职位-职位下']",
+                            new Page.WaitForSelectorOptions().setTimeout(10_000));
+                } catch (Exception ignored) {}
 
                 // 检查是否出现访问验证
                 if (checkAccessVerification()) {
@@ -240,7 +246,7 @@ public class Job51 {
                 deliverCurrentPage();
                 if (reachedDailyLimit) break;
 
-                PlaywrightUtil.sleep(3);
+                page.waitForTimeout(500);
             }
 
             // 关键词完成不输出日志
@@ -250,60 +256,383 @@ public class Job51 {
     /**
      * 投递当前页面的所有职位
      */
-    private void deliverCurrentPage() {
+    void deliverCurrentPage() {
         try {
-            PlaywrightUtil.sleep(1);
+            page.waitForTimeout(100);
+            Locator existingResumeDialog = findVisibleDialogContaining("选择需要同步发送的附件简历");
+            if (existingResumeDialog != null) {
+                blockingDialogOpen = true;
+                sendProgress("检测到尚未处理的附件简历弹窗，请先手动完成或刷新页面后重试", null, null);
+                return;
+            }
+            closeAnyModalOverlays();
 
-            // 查找所有职位的checkbox
-            Locator checkboxes = page.locator("div.ick");
-            if (checkboxes.count() == 0) { return; }
-
-            // 查找职位名称和公司名称
-            Locator titles = page.locator("[class*='jname text-cut']");
-            Locator companies = page.locator("[class*='cname text-cut']");
-
-            int jobCount = checkboxes.count();
-
-            // 选中所有职位
-            for (int i = 0; i < jobCount; i++) {
-                if (shouldStop()) {
-                    return;
-                }
-
-                try {
-                    Locator checkbox = checkboxes.nth(i);
-                    // 使用JavaScript点击，避免元素被遮挡
-                    checkbox.evaluate("el => el.click()");
-
-                    String title = i < titles.count() ? titles.nth(i).textContent() : "未知职位";
-                    String company = i < companies.count() ? companies.nth(i).textContent() : "未知公司";
-                    String jobInfo = company + " | " + title;
-                    resultList.add(jobInfo);
-//                    log.info("选中: {}", jobInfo);
-                } catch (Exception e) { /* 静默 */ }
+            // 51job 的底部“一键投递”会触发“该职位类型不可批量投递”。这里只收集
+            // 每张岗位卡片上文本严格等于“投递”的按钮，然后逐个完成附件简历选择。
+            List<JobCard> jobs = collectDeliverableJobCards();
+            if (jobs.isEmpty()) {
+                log.info("[51job] 当前页没有可投递岗位");
+                return;
             }
 
-            PlaywrightUtil.sleep(1);
+            log.info("[51job] 当前页发现 {} 个可逐一投递岗位，附件简历序号={}",
+                    jobs.size(), selectedResumeIndex());
+            for (int i = 0; i < jobs.size(); i++) {
+                if (shouldStop() || reachedDailyLimit) return;
 
-            // 滚动到页面顶部
-            page.evaluate("window.scrollTo(0, 0)");
-            PlaywrightUtil.sleep(1);
-
-            // 点击批量投递按钮
-            clickBatchDeliverButton();
-
-            PlaywrightUtil.sleep(3);
-
-            // 处理投递成功弹窗
-            handleDeliverySuccessDialog();
-
-            // 处理单独投递申请弹窗
-            handleSeparateDeliveryDialog();
-
+                JobCard job = jobs.get(i);
+                sendProgress(String.format("正在逐个投递 %d/%d：%s", i + 1, jobs.size(), job.title()),
+                        i + 1, jobs.size());
+                try {
+                    if (deliverSingleJob(job)) {
+                        String jobInfo = job.company() + " | " + job.title();
+                        resultList.add(jobInfo);
+                        if (job.jobId() != null) {
+                            // 必须在页面明确出现“投递成功”后才更新数据库。
+                            job51Service.markDelivered(job.jobId());
+                        } else {
+                            log.warn("[51job] 岗位投递成功但未解析到 jobId，无法更新数据库：{}", jobInfo);
+                        }
+                        log.info("[51job] 投递成功：{}，jobId={}", jobInfo, job.jobId());
+                        sendProgress("投递成功：" + jobInfo, null, null);
+                        if (blockingDialogOpen) {
+                            sendProgress("投递已成功，但成功弹窗未关闭，已停止当前页以避免遮挡后续岗位", null, null);
+                            return;
+                        }
+                    } else if (!reachedDailyLimit) {
+                        if (blockingDialogOpen) {
+                            log.warn("[51job] 附件简历弹窗仍处于打开状态，为避免误投递，停止处理当前页：{} | {}",
+                                    job.company(), job.title());
+                            sendProgress("附件简历弹窗未处理完成，已停止当前页，不会继续点击下一家公司", null, null);
+                            return;
+                        }
+                        log.warn("[51job] 岗位未确认投递成功，跳过：{} | {}", job.company(), job.title());
+                        sendProgress("未确认投递成功，已跳过：" + job.title(), null, null);
+                    }
+                } catch (Exception e) {
+                    if (findVisibleDialogContaining("选择需要同步发送的附件简历") != null) {
+                        blockingDialogOpen = true;
+                        log.warn("[51job] 单个岗位处理异常且附件弹窗仍打开，停止当前页：{} | {}，原因：{}",
+                                job.company(), job.title(), e.getMessage());
+                        sendProgress("附件简历弹窗仍然打开，已停止当前页，不会继续点击下一家公司", null, null);
+                        return;
+                    }
+                    log.warn("[51job] 单个岗位投递失败，继续下一个：{} | {}，原因：{}",
+                            job.company(), job.title(), e.getMessage());
+                    closeAnyModalOverlays();
+                }
+                if (!shouldStop() && !reachedDailyLimit) {
+                    page.waitForTimeout(250);
+                }
+            }
         } catch (Exception e) {
             log.error("投递当前页面失败", e);
         }
     }
+
+    private List<JobCard> collectDeliverableJobCards() {
+        List<JobCard> jobs = new ArrayList<>();
+        Object raw = page.evaluate("""
+                () => {
+                  const result = [];
+                  let applyIndex = 0;
+                  const buttons = Array.from(document.querySelectorAll('button'));
+                  for (let buttonIndex = 0; buttonIndex < buttons.length; buttonIndex++) {
+                    const button = buttons[buttonIndex];
+                    if ((button.innerText || '').trim() !== '投递') continue;
+                    const rect = button.getBoundingClientRect();
+                    const style = getComputedStyle(button);
+                    if (!rect.width || !rect.height || style.display === 'none' || style.visibility === 'hidden') continue;
+
+                    let card = button.parentElement;
+                    while (card && card !== document.body && !card.querySelector('[class*="jname"]')) {
+                      card = card.parentElement;
+                    }
+                    const title = (card?.querySelector('[class*="jname"]')?.innerText || '未知职位').trim();
+                    const company = (card?.querySelector('[class*="cname"]')?.innerText || '未知公司').trim();
+                    const cardText = (card?.innerText || '').replace(/\\s+/g, ' ').trim();
+
+                    let jobId = null;
+                    const links = Array.from(card?.querySelectorAll('a[href]') || []);
+                    for (const link of links) {
+                      const href = link.getAttribute('href') || '';
+                      const match = href.match(/[?&]jobId=(\\d+)/) || href.match(/\\/(\\d+)\\.html/) || href.match(/(\\d{5,})/);
+                      if (match) { jobId = match[1]; break; }
+                    }
+                    if (!jobId && card) {
+                      const idNode = card.querySelector('[data-jobid], [data-analysis-jobid], [data-job-id]');
+                      jobId = idNode?.getAttribute('data-jobid') || idNode?.getAttribute('data-analysis-jobid') ||
+                              idNode?.getAttribute('data-job-id') || null;
+                    }
+                    result.push({buttonIndex, applyIndex, title, company, jobId, campus: cardText.includes('校招')});
+                    applyIndex++;
+                  }
+                  return result;
+                }
+                """);
+        if (!(raw instanceof List<?> rows)) return jobs;
+
+        Locator buttons = page.locator("button");
+        for (Object item : rows) {
+            try {
+                if (!(item instanceof java.util.Map<?, ?> row)) continue;
+                int buttonIndex = ((Number) row.get("buttonIndex")).intValue();
+                int applyIndex = ((Number) row.get("applyIndex")).intValue();
+                String title = String.valueOf(row.get("title"));
+                String company = String.valueOf(row.get("company"));
+                boolean campus = Boolean.TRUE.equals(row.get("campus"));
+                if (campus) {
+                    log.info("[51job] 跳过校招岗位：{} | {}", company, title);
+                    sendProgress("已跳过校招岗位：" + title, null, null);
+                    continue;
+                }
+
+                Long jobId = null;
+                Object rawJobId = row.get("jobId");
+                if (rawJobId != null && !String.valueOf(rawJobId).isBlank()) {
+                    try { jobId = Long.parseLong(String.valueOf(rawJobId).replaceAll("[^0-9]", "")); }
+                    catch (Exception ignored) {}
+                }
+                if (jobId == null) {
+                    synchronized (currentPageJobIds) {
+                        if (applyIndex >= 0 && applyIndex < currentPageJobIds.size()) {
+                            jobId = currentPageJobIds.get(applyIndex);
+                        }
+                    }
+                }
+                jobs.add(new JobCard(buttons.nth(buttonIndex), jobId, title, company));
+            } catch (Exception e) {
+                log.debug("[51job] 解析岗位卡片失败: {}", e.getMessage());
+            }
+        }
+        return jobs;
+    }
+
+    private boolean deliverSingleJob(JobCard job) {
+        job.button().scrollIntoViewIfNeeded();
+        job.button().click();
+
+        Locator resumeDialog = waitForResumeDialogOrSuccess(5_000);
+        if (isDeliverySuccessVisible()) {
+            if (!closeDeliveryResultDialog()) blockingDialogOpen = true;
+            return true;
+        }
+        if (reachedDailyLimit || resumeDialog == null) {
+            log.warn("[51job] 点击投递后未出现附件简历弹窗：{}", visibleDialogText());
+            closeAnyModalOverlays();
+            return false;
+        }
+
+        if (!selectResume(resumeDialog, selectedResumeIndex())) {
+            log.warn("[51job] 附件简历列表为空，无法投递：{}", job.title());
+            // 这个弹窗配置为不可点遮罩关闭、不可按 ESC 关闭。不能假装关闭后继续点
+            // 下一家公司，否则遮罩会拦截后续点击并等待 30 秒超时。
+            blockingDialogOpen = true;
+            return false;
+        }
+        // Vue/ElementUI 需要一个事件循环把单选状态同步到“发送”按钮。
+        page.waitForTimeout(200);
+
+        Locator sendButton = findExactVisibleButton(resumeDialog, "发送");
+        if (sendButton == null) {
+            log.warn("[51job] 附件简历弹窗中未找到“发送”按钮");
+            blockingDialogOpen = true;
+            return false;
+        }
+        sendButton.click();
+
+        boolean success = waitForDeliverySuccess(12_000);
+        if (success) {
+            if (!closeDeliveryResultDialog()) blockingDialogOpen = true;
+            return true;
+        }
+        log.warn("[51job] 点击发送后未检测到“投递成功”：{}", visibleDialogText());
+        if (findVisibleDialogContaining("选择需要同步发送的附件简历") != null) {
+            blockingDialogOpen = true;
+            return false;
+        }
+        closeAnyModalOverlays();
+        return false;
+    }
+
+    private Locator waitForResumeDialogOrSuccess(long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline && !shouldStop()) {
+            if (isDeliverySuccessVisible()) return null;
+            if (detectDailyLimitToast51job()) {
+                reachedDailyLimit = true;
+                sendProgress("检测到日投递上限，任务已停止", null, null);
+                return null;
+            }
+            Locator dialog = findVisibleDialogContaining("选择需要同步发送的附件简历");
+            if (dialog != null) return dialog;
+            page.waitForTimeout(200);
+        }
+        return null;
+    }
+
+    private boolean selectResume(Locator dialog, int oneBasedIndex) {
+        Locator[] candidates = new Locator[] {
+                // 51job PC 端真实结构：SelectAttachmentResume 组件没有 input，
+                // 点击 attachment_item 后由内部的 .radio.selected 表示选中。
+                dialog.locator(".attachment_list .attachment_item"),
+                // 移动端同组件也使用相同的 attachment_item 结构。
+                dialog.locator(".attachment_item"),
+                dialog.locator("input[type='radio']"),
+                dialog.locator("label.el-radio"),
+                dialog.locator("[role='radio']"),
+                dialog.locator(".van-radio")
+        };
+        for (Locator options : candidates) {
+            int count;
+            try { count = options.count(); } catch (Exception ignored) { continue; }
+            if (count == 0) continue;
+            int requested = oneBasedIndex - 1;
+            int selected = requested >= 0 && requested < count ? requested : 0;
+            if (selected != requested) {
+                sendProgress(String.format("配置的第%d份附件简历不存在，已改用第一份", oneBasedIndex), null, null);
+            }
+            Locator option = options.nth(selected);
+            try {
+                option.click(new Locator.ClickOptions().setForce(true));
+            } catch (Exception e) {
+                option.evaluate("el => el.click()");
+            }
+
+            if (options == candidates[0] || options == candidates[1]) {
+                long deadline = System.currentTimeMillis() + 2_000;
+                while (System.currentTimeMillis() < deadline && !shouldStop()) {
+                    try {
+                        if (option.locator(".radio.selected").count() > 0) return true;
+                    } catch (Exception ignored) {}
+                    page.waitForTimeout(100);
+                }
+                log.warn("[51job] 已点击第{}份附件简历，但页面没有出现选中状态", selected + 1);
+                return false;
+            }
+            return true;
+        }
+        return false;
+    }
+
+    private boolean waitForDeliverySuccess(long timeoutMs) {
+        long deadline = System.currentTimeMillis() + timeoutMs;
+        while (System.currentTimeMillis() < deadline && !shouldStop()) {
+            if (isDeliverySuccessVisible()) return true;
+            if (isExplicitDeliveryFailureVisible()) return false;
+            if (detectDailyLimitToast51job()) {
+                reachedDailyLimit = true;
+                sendProgress("检测到日投递上限，任务已停止", null, null);
+                return false;
+            }
+            page.waitForTimeout(200);
+        }
+        return false;
+    }
+
+    private boolean isExplicitDeliveryFailureVisible() {
+        String[] messages = {
+                "投递失败", "该职位类型不可批量投递", "需要到企业招聘平台单独申请",
+                "职位已下线", "该职位已暂停招聘"
+        };
+        for (String message : messages) {
+            try {
+                Locator matches = page.locator("text=\"" + message + "\"");
+                for (int i = 0; i < matches.count(); i++) {
+                    if (matches.nth(i).isVisible()) return true;
+                }
+            } catch (Exception ignored) {}
+        }
+        return false;
+    }
+
+    private boolean isDeliverySuccessVisible() {
+        try {
+            Locator success = page.locator("text=\"投递成功\"");
+            for (int i = 0; i < success.count(); i++) {
+                if (success.nth(i).isVisible()) return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private Locator findVisibleDialogContaining(String expectedText) {
+        Locator dialogs = page.locator(
+                ".attachment_resume_dialog, .attachment_resume_popup, .el-dialog, " +
+                "[role='dialog'], .van-popup, [class*='dialog']");
+        for (int i = 0; i < dialogs.count(); i++) {
+            try {
+                Locator dialog = dialogs.nth(i);
+                if (dialog.isVisible() && dialog.innerText().contains(expectedText)) return dialog;
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    private Locator findExactVisibleButton(Locator root, String expectedText) {
+        Locator buttons = root.locator("button");
+        for (int i = 0; i < buttons.count(); i++) {
+            try {
+                Locator button = buttons.nth(i);
+                String text = button.innerText();
+                if (button.isVisible() && expectedText.equals(text == null ? "" : text.trim())) return button;
+            } catch (Exception ignored) {}
+        }
+        return null;
+    }
+
+    private String visibleDialogText() {
+        try {
+            Locator dialogs = page.locator(".el-dialog:visible, [role='dialog']:visible, .van-popup:visible, .el-message:visible");
+            if (dialogs.count() > 0) return dialogs.first().innerText().replace('\n', ' ').trim();
+        } catch (Exception ignored) {}
+        return "未发现可见提示";
+    }
+
+    private boolean closeDeliveryResultDialog() {
+        try {
+            Locator close = page.locator(
+                    ".success-popup .close-button, " +
+                    ".success-popup-2 button.el-dialog__headerbtn:visible, " +
+                    "button.el-dialog__headerbtn:visible, button[aria-label='Close']:visible, " +
+                    ".van-popup__close-icon:visible, .van-icon-cross:visible");
+            if (close.count() == 0) {
+                log.warn("[51job] 已投递成功，但未找到成功弹窗右上角关闭按钮");
+                return false;
+            }
+            // 51job 的橙色 X 是 img.close-button，直接触发 DOM click 可避免图标部分
+            // 超出弹窗边界时 Playwright 判定“outside of viewport”。
+            close.first().evaluate("el => el.click()");
+            long deadline = System.currentTimeMillis() + 3_000;
+            while (System.currentTimeMillis() < deadline) {
+                if (!isSuccessPopupVisible()) return true;
+                page.waitForTimeout(100);
+            }
+            log.warn("[51job] 已点击成功弹窗关闭按钮，但弹窗仍然可见");
+            return false;
+        } catch (Exception e) {
+            log.warn("[51job] 关闭投递结果弹窗失败: {}", e.getMessage());
+            return false;
+        }
+    }
+
+    private boolean isSuccessPopupVisible() {
+        try {
+            Locator popups = page.locator(".success-popup:visible, .success-popup-2:visible, .van-popup:visible");
+            for (int i = 0; i < popups.count(); i++) {
+                Locator popup = popups.nth(i);
+                if (popup.isVisible() && popup.innerText().contains("投递成功")) return true;
+            }
+        } catch (Exception ignored) {}
+        return false;
+    }
+
+    private int selectedResumeIndex() {
+        Integer value = config == null ? null : config.getResumeIndex();
+        return value == null || value < 1 ? 1 : value;
+    }
+
+    private record JobCard(Locator button, Long jobId, String title, String company) {}
 
     /**
      * 点击批量投递按钮

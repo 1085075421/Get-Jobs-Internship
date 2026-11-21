@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react'
 import { createSSEWithBackoff } from '@/lib/sse'
-import { BiLogOut, BiSave, BiBriefcase, BiPlay, BiStop } from 'react-icons/bi'
+import { BiLogOut, BiSave, BiBriefcase, BiPlay, BiStop, BiPlus, BiTrash } from 'react-icons/bi'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { Input } from '@/components/ui/input'
@@ -18,10 +18,12 @@ interface ZhilianConfig {
   keywords?: string
   cityCode?: string
   salary?: string
+  jobNature?: string
 }
 
 interface Option { name: string; code: string }
 interface ZhilianOptions { city: Option[] }
+interface BlacklistItem { id: number; type: 'company' | 'job'; value: string }
 
 export default function ZhilianPage() {
   const [isLoggedIn, setIsLoggedIn] = useState(false)
@@ -34,9 +36,12 @@ export default function ZhilianPage() {
   const [logoutResult, setLogoutResult] = useState<{ success: boolean; message: string } | null>(null)
   const [backendAvailable, setBackendAvailable] = useState(true)
 
-  const [config, setConfig] = useState<ZhilianConfig>({ keywords: '', cityCode: '', salary: '' })
+  const [config, setConfig] = useState<ZhilianConfig>({ keywords: '', cityCode: '', salary: '', jobNature: '0' })
   const [options, setOptions] = useState<ZhilianOptions>({ city: [] })
   const [loadingConfig, setLoadingConfig] = useState(true)
+  const [blacklist, setBlacklist] = useState<BlacklistItem[]>([])
+  const [blacklistType, setBlacklistType] = useState<'company' | 'job'>('company')
+  const [blacklistValue, setBlacklistValue] = useState('')
 
   useEffect(() => {
     if (typeof window === 'undefined' || typeof EventSource === 'undefined') {
@@ -125,6 +130,7 @@ export default function ZhilianPage() {
         setConfig(normalized)
       }
       if (data.options) setOptions(data.options)
+      if (Array.isArray(data.blacklist)) setBlacklist(data.blacklist)
     } catch (e) {
       console.error('[智联] 获取配置失败:', e)
     } finally {
@@ -221,6 +227,38 @@ export default function ZhilianPage() {
     }
   }
 
+  const addBlacklist = async () => {
+    const value = blacklistValue.trim()
+    if (!value) return
+    try {
+      const response = await fetch(`${API_BASE}/api/zhilian/blacklist`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ type: blacklistType, value }),
+      })
+      if (!response.ok) {
+        const error = await response.json().catch(() => ({}))
+        setSaveResult({ success: false, message: error.message || '添加黑名单失败。' })
+        setShowSaveDialog(true)
+        return
+      }
+      setBlacklistValue('')
+      await fetchAllData()
+    } catch {
+      setSaveResult({ success: false, message: '添加黑名单失败：网络或服务异常。' })
+      setShowSaveDialog(true)
+    }
+  }
+
+  const deleteBlacklist = async (id: number) => {
+    try {
+      const response = await fetch(`${API_BASE}/api/zhilian/blacklist/${id}`, { method: 'DELETE' })
+      if (response.ok) setBlacklist((items) => items.filter((item) => item.id !== id))
+    } catch (error) {
+      console.error('[智联] 删除黑名单失败:', error)
+    }
+  }
+
   return (
     <div className="space-y-6">
       <PageHeader
@@ -310,9 +348,14 @@ export default function ZhilianPage() {
                       placeholder="请选择城市"
                     >
                       {options.city.map((o) => (
-                        <option key={o.code} value={o.code}>{o.name}</option>
+                        <option key={o.code} value={o.code}>
+                          {o.code === '0' ? '不限（遍历全部热门城市）' : o.name}
+                        </option>
                       ))}
                     </Select>
+                    <p className="text-xs text-muted-foreground">
+                      选择“不限”后，将按北京、上海、广州等热门城市顺序逐城完成搜索和投递。
+                    </p>
                   </div>
                   <div className="space-y-2">
                     <Label>薪资范围（最低和最高工资，用逗号分割）</Label>
@@ -322,8 +365,80 @@ export default function ZhilianPage() {
                       onChange={(e) => setConfig((c) => ({ ...c, salary: e.target.value }))}
                     />
                   </div>
+                  <div className="space-y-2">
+                    <Label>工作性质</Label>
+                    <Select
+                      value={config.jobNature || '0'}
+                      onChange={(e) => setConfig((c) => ({ ...c, jobNature: e.target.value }))}
+                      placeholder="请选择工作性质"
+                    >
+                      <option value="0">不限</option>
+                      <option value="4">实习</option>
+                    </Select>
+                    <p className="text-xs text-muted-foreground">选择“实习”后，智联搜索仅保留实习岗位。</p>
+                  </div>
                 </div>
               )}
+            </CardContent>
+          </Card>
+
+          <Card className="animate-in fade-in slide-in-from-bottom-5 duration-700">
+            <CardHeader>
+              <CardTitle className="flex items-center gap-2">
+                <BiTrash className="text-primary" />
+                黑名单管理（{blacklist.length} 条）
+              </CardTitle>
+            </CardHeader>
+            <CardContent className="space-y-4">
+              <div className="grid grid-cols-1 gap-2 md:grid-cols-[180px_1fr_auto]">
+                <Select value={blacklistType} onChange={(e) => setBlacklistType(e.target.value as 'company' | 'job')}>
+                  <option value="company">公司名称</option>
+                  <option value="job">岗位名称</option>
+                </Select>
+                <Input
+                  value={blacklistValue}
+                  onChange={(e) => setBlacklistValue(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter') void addBlacklist() }}
+                  placeholder={blacklistType === 'company' ? '输入公司名称关键词，如：某某科技' : '输入岗位名称关键词，如：销售'}
+                />
+                <Button onClick={addBlacklist} disabled={!blacklistValue.trim()} className="gap-1">
+                  <BiPlus /> 添加
+                </Button>
+              </div>
+              <p className="text-xs text-muted-foreground">
+                使用包含匹配且不区分英文大小写；命中后会在点击“立即投递”前跳过该岗位。
+              </p>
+              <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+                {(['company', 'job'] as const).map((type) => {
+                  const items = blacklist.filter((item) => item.type === type)
+                  return (
+                    <div key={type} className="rounded-xl border p-3">
+                      <div className="mb-3 text-sm font-medium">
+                        {type === 'company' ? '公司黑名单' : '岗位黑名单'}（{items.length}）
+                      </div>
+                      {items.length === 0 ? (
+                        <p className="text-xs text-muted-foreground">暂无记录</p>
+                      ) : (
+                        <div className="flex flex-wrap gap-2">
+                          {items.map((item) => (
+                            <span key={item.id} className="inline-flex items-center gap-1 rounded-full bg-muted px-3 py-1 text-sm">
+                              {item.value}
+                              <button
+                                type="button"
+                                onClick={() => deleteBlacklist(item.id)}
+                                className="ml-1 text-muted-foreground hover:text-red-500"
+                                aria-label={`删除 ${item.value}`}
+                              >
+                                <BiTrash />
+                              </button>
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  )
+                })}
+              </div>
             </CardContent>
           </Card>
         </TabsContent>
