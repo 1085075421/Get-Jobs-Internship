@@ -45,7 +45,7 @@ public class CampusPlatformJobService {
             if (stopping.getOrDefault(platform, false)) {
                 progress.accept("投递任务已按用户请求停止，共成功投递 " + count + " 个岗位");
             } else {
-                progress.accept("所有关键词的全部结果页处理完成，共成功投递 " + count + " 个岗位");
+                progress.accept("本轮岗位结果处理完成，共成功投递 " + count + " 个岗位");
             }
             return count;
         } finally {

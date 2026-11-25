@@ -134,10 +134,13 @@ export default function CampusPlatformPage({ platform }: { platform: Platform })
         <Card><CardHeader><CardTitle>{displayName}平台说明</CardTitle></CardHeader><CardContent className="space-y-2 text-sm text-muted-foreground">
           <p>应用启动后会打开独立的 {displayName} 标签页，请先在该标签页手动登录，然后点击“刷新登录”。</p>
           <p>任务会处理每个关键词的全部搜索结果页，投递所有未投递且未命中黑名单的岗位；直到全部处理完成或你手动停止。</p>
+          {platform === 'nowcoder' && <p>搜索关键词留空时不会重新搜索，而是保留牛客网当前页面已经设置好的城市、岗位类型等筛选条件，直接处理当前岗位结果。</p>}
         </CardContent></Card>
         <Card><CardHeader><CardTitle>配置参数</CardTitle></CardHeader><CardContent className="grid grid-cols-1 gap-4 md:grid-cols-3">
           <div className="space-y-2"><Label>搜索关键词（逗号分隔）</Label><Input value={config.keywords || ''} placeholder="计算机视觉实习, 算法实习"
-            onChange={e => setConfig(v => ({ ...v, keywords: e.target.value }))} /></div>
+            onChange={e => setConfig(v => ({ ...v, keywords: e.target.value }))} />
+            {platform === 'nowcoder' && <p className="text-xs text-muted-foreground">留空时直接使用当前牛客网岗位列表及已选筛选条件，不会修改页面或重新搜索。</p>}
+          </div>
           <div className="space-y-2"><Label>城市（留空表示不限）</Label><Input value={config.city || ''} placeholder="北京"
             onChange={e => setConfig(v => ({ ...v, city: e.target.value }))} /></div>
           {platform === 'shixiseng' && <>

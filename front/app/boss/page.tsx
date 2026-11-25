@@ -893,7 +893,9 @@ export default function BossPage() {
                     onChange={(e) => setKeywordsDisplay(e.target.value)}
                     placeholder="例如：Java开发工程师"
                   />
-                  <p className="text-xs text-muted-foreground">职位搜索的关键词</p>
+                  <p className="text-xs text-muted-foreground">
+                    留空时不发起搜索，直接使用当前 Boss 岗位列表及已选岗位类别、筛选条件进行投递
+                  </p>
                 </div>
 
                 <div className="space-y-2">

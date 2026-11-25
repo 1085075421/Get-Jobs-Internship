@@ -109,6 +109,17 @@ public class Boss {
      * 执行投递
      */
     public int execute() {
+        // 关键词留空表示用户已经在 Boss 页面手动选好了岗位类别和筛选条件。
+        // 此时不能再拼接搜索 URL，否则会把当前页面的岗位类别、城市等条件全部冲掉。
+        if (!hasConfiguredSearchKeywords(config != null ? config.getKeywords() : null)) {
+            log.info("Boss搜索关键词为空，将保留当前岗位列表及手动筛选条件直接投递");
+            if (progressCallback != null) {
+                progressCallback.accept("关键词为空，正在使用Boss当前岗位列表", 0, 0);
+            }
+            postJobByCity(null);
+            return resultList.size();
+        }
+
         for (String cityCode : config.getCityCode()) {
             if (shouldStopCallback != null && Boolean.TRUE.equals(shouldStopCallback.get())) {
                 progressCallback.accept("用户取消投递", 0, 0);
@@ -121,6 +132,12 @@ public class Boss {
             }
         }
         return resultList.size();
+    }
+
+    static boolean hasConfiguredSearchKeywords(List<String> keywords) {
+        return keywords != null && keywords.stream()
+                .filter(Objects::nonNull)
+                .anyMatch(keyword -> !keyword.isBlank());
     }
 
     /**
@@ -225,23 +242,36 @@ public class Boss {
     }
 
     private void postJobByCity(String cityCode) {
-        String searchUrl = getSearchUrl(cityCode);
-        for (String keyword : config.getKeywords()) {
+        List<String> configuredKeywords = config.getKeywords() == null
+                ? List.of()
+                : config.getKeywords().stream()
+                        .filter(Objects::nonNull)
+                        .map(String::trim)
+                        .filter(keyword -> !keyword.isEmpty())
+                        .toList();
+        boolean useCurrentPage = configuredKeywords.isEmpty();
+        String searchUrl = useCurrentPage ? null : getSearchUrl(cityCode);
+        List<String> keywords = useCurrentPage ? List.of("") : configuredKeywords;
+        for (String keyword : keywords) {
+            String taskLabel = keyword.isBlank() ? "当前页面已选岗位" : keyword;
             // 检查是否需要停止
-            if (shouldStopCallback.get()) {
+            if (shouldStopCallback != null && Boolean.TRUE.equals(shouldStopCallback.get())) {
                 progressCallback.accept("用户取消投递", 0, 0);
                 return;
             }
 
             int postCount = 0;
-            // 使用 URLEncoder 对关键词进行编码
-            String encodedKeyword = URLEncoder.encode(keyword, StandardCharsets.UTF_8);
-
-            String url = searchUrl + (searchUrl.contains("?") ? "&" : "?") + "query=" + encodedKeyword;
             // 单个关键词失败不该让整个投递任务中止，下面整段都包在 try 里
             try {
-            // 进列表页 + 等列表渲染，整段带重试
-            openJobListWithRetry(keyword, url, cityCode);
+            if (useCurrentPage) {
+                validateCurrentJobList();
+            } else {
+                // 使用 URLEncoder 对关键词进行编码
+                String encodedKeyword = URLEncoder.encode(keyword, StandardCharsets.UTF_8);
+                String url = searchUrl + (searchUrl.contains("?") ? "&" : "?") + "query=" + encodedKeyword;
+                // 进列表页 + 等列表渲染，整段带重试
+                openJobListWithRetry(keyword, url, cityCode);
+            }
 
             // 1. 基于 footer 出现滚动到底，确保加载全部岗位
             int lastCount = -1;
@@ -271,7 +301,7 @@ public class Boss {
                         footerVisible = true;
                     }
                     if (footerVisible && stableTries >= 2) {
-                        log.info("【{}】已滚动到底部且连续 {} 轮无新增，判定加载完毕", keyword, stableTries);
+                        log.info("【{}】已滚动到底部且连续 {} 轮无新增，判定加载完毕", taskLabel, stableTries);
                         loadedAll = true;
                         break;
                     }
@@ -279,7 +309,7 @@ public class Boss {
                     page.evaluate("() => window.scrollBy(0, Math.floor(window.innerHeight * 1.5))");
 
                     // 获取卡片数量变化，判断是否需要强制触底
-                    Locator cardsProbe = page.locator("//ul[contains(@class, 'rec-job-list')]//li[contains(@class, 'job-card-box')]");
+                    Locator cardsProbe = page.locator(JOB_LIST_SELECTOR);
                     int currentCount = cardsProbe.count();
                     if (currentCount == lastCount) {
                         stableTries++;
@@ -295,7 +325,7 @@ public class Boss {
                     // 强制触底之后仍然连着好几轮没有新岗位，就认定加载完了。
                     // 不能只靠 footer —— Boss 有些版式根本没有 #footer，只等它就是死循环。
                     if (stableTries >= 8) {
-                        log.info("【{}】连续 {} 轮没有新增岗位，判定已加载完毕", keyword, stableTries);
+                        log.info("【{}】连续 {} 轮没有新增岗位，判定已加载完毕", taskLabel, stableTries);
                         loadedAll = true;
                         break;
                     }
@@ -305,26 +335,26 @@ public class Boss {
                     }
                     staleHits++;
                     if (staleHits > 20) {
-                        log.warn("【{}】滚动期间反复出现失效对象异常({}次)，停止继续加载", keyword, staleHits);
+                        log.warn("【{}】滚动期间反复出现失效对象异常({}次)，停止继续加载", taskLabel, staleHits);
                         break;
                     }
                     PlaywrightUtil.sleep(1);
                 }
             }
             if (!loadedAll) {
-                log.warn("【{}】滚动到达 300 轮上限仍未确认加载完毕，按当前已加载的岗位继续", keyword);
+                log.warn("【{}】滚动到达 300 轮上限仍未确认加载完毕，按当前已加载的岗位继续", taskLabel);
             }
             // 统计最终岗位数量
             int loadedCount = countJobCards();
-            log.info("【{}】岗位已全部加载，总数:{}", keyword, loadedCount);
-            progressCallback.accept("岗位加载完成：" + keyword, 0, loadedCount);
+            log.info("【{}】岗位已全部加载，总数:{}", taskLabel, loadedCount);
+            progressCallback.accept("岗位加载完成：" + taskLabel, 0, loadedCount);
 
             // 2. 回到页面顶部
             page.evaluate("window.scrollTo(0, 0);");
             PlaywrightUtil.sleep(1);
 
             // 3. 逐个遍历所有岗位
-            Locator cards = page.locator("//ul[contains(@class, 'rec-job-list')]//li[contains(@class, 'job-card-box')]");
+            Locator cards = page.locator(JOB_LIST_SELECTOR);
             int count = cards.count();
             for (int i = 0; i < count; i++) {
                 // 检查是否需要停止
@@ -334,7 +364,7 @@ public class Boss {
                 }
 
                 // 重新获取卡片，避免元素过期
-                cards = page.locator("//ul[contains(@class, 'rec-job-list')]//li[contains(@class, 'job-card-box')]");
+                cards = page.locator(JOB_LIST_SELECTOR);
                 // 在点击卡片时同步等待岗位详情接口返回，随后解析并入库
                 Response detailResp = null;
                 try {
@@ -466,18 +496,23 @@ public class Boss {
                 // 停顿期间可能已经被弹到安全验证页，发现了就停下来等人工过验证，
                 // 而不是继续闷头点下去（继续点只会让后面的关键词全部失败）
                 if (isSecurityVerifyUrl(safeUrl())) {
-                    log.warn("【{}】遍历过程中被跳转到安全验证页：{}", keyword, safeUrl());
+                    log.warn("【{}】遍历过程中被跳转到安全验证页：{}", taskLabel, safeUrl());
                     if (progressCallback != null) {
                         progressCallback.accept("触发Boss安全校验，请在浏览器中手动完成验证", i + 1, count);
                     }
                     waitForSliderVerify(page);
                 }
             }
-            log.info("【{}】岗位已投递完毕！已投递岗位数量:{}", keyword, postCount);
+            log.info("【{}】岗位已投递完毕！已投递岗位数量:{}", taskLabel, postCount);
             } catch (Exception e) {
-                log.error("【{}】处理失败，跳过该关键词继续下一个：{}", keyword, e.getMessage(), e);
+                log.error("【{}】处理失败，跳过该任务继续下一个：{}", taskLabel, e.getMessage(), e);
                 if (progressCallback != null) {
-                    progressCallback.accept("关键词[" + keyword + "]失败已跳过：" + e.getMessage(), 0, 0);
+                    progressCallback.accept("任务[" + taskLabel + "]失败已跳过：" + e.getMessage(), 0, 0);
+                }
+                // 当前页面模式没有下一个关键词可继续。校验或投递失败时直接让任务失败，
+                // 避免界面把“未识别到岗位列表”误报成“投递完成 0 个岗位”。
+                if (useCurrentPage) {
+                    throw new IllegalStateException("Boss当前岗位列表投递失败：" + e.getMessage(), e);
                 }
             }
         }
@@ -949,6 +984,44 @@ public class Boss {
         }
         dumpListPageStructure();
         throw new IllegalStateException("岗位列表始终未出现，当前页面: " + safeUrl());
+    }
+
+    /**
+     * 关键词为空时只使用用户当前打开的岗位列表，绝不导航或重置筛选条件。
+     * 先同时校验 URL 和岗位卡片，避免误在首页、聊天页等页面执行点击操作。
+     */
+    private void validateCurrentJobList() {
+        String currentUrl = safeUrl();
+        if (!isBossJobListUrl(currentUrl)) {
+            throw new IllegalStateException(
+                    "搜索关键词为空，但当前标签页不是Boss岗位列表页。请先在Boss中选择岗位类别和筛选条件，确认岗位列表已显示后再开始投递。当前页面: "
+                            + currentUrl);
+        }
+
+        waitForJobList();
+        int initialCount = countJobCards();
+        if (initialCount <= 0) {
+            dumpListPageStructure();
+            throw new IllegalStateException(
+                    "搜索关键词为空，且当前Boss岗位列表没有检测到可投递岗位。请等待岗位列表加载完成后重试。当前页面: "
+                            + currentUrl);
+        }
+
+        log.info("已确认Boss当前岗位列表，共检测到{}个已加载岗位；保留现有岗位类别和筛选条件继续加载", initialCount);
+        if (progressCallback != null) {
+            progressCallback.accept("已识别Boss当前岗位列表，开始加载全部岗位", 0, initialCount);
+        }
+    }
+
+    static boolean isBossJobListUrl(String url) {
+        if (url == null) {
+            return false;
+        }
+        String normalized = url.toLowerCase(Locale.ROOT);
+        return normalized.startsWith("https://www.zhipin.com/web/geek/jobs")
+                || normalized.startsWith("http://www.zhipin.com/web/geek/jobs")
+                || normalized.startsWith("https://zhipin.com/web/geek/jobs")
+                || normalized.startsWith("http://zhipin.com/web/geek/jobs");
     }
 
     private String safeUrl() {

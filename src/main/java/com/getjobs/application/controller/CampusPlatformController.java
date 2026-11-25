@@ -88,7 +88,7 @@ public class CampusPlatformController {
             return ResponseEntity.badRequest().body(Map.of("success", false, "message", "投递任务已在运行中"));
         }
         String keywords = String.valueOf(store.getConfig(platform).getOrDefault("keywords", "")).trim();
-        if (keywords.isEmpty() || "[]".equals(keywords)) {
+        if ((keywords.isEmpty() || "[]".equals(keywords)) && !"nowcoder".equals(platform)) {
             return ResponseEntity.badRequest().body(Map.of("success", false, "message", "请先填写搜索关键词"));
         }
         CompletableFuture.runAsync(() -> {
